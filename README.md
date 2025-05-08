@@ -23,7 +23,6 @@ Turma, queria compartilhar com vcs esse projetinho de servidor pessoal configura
 ├── html/
 │   ├── index.html
 │   ├── 404.html
-│   ├── vite.svg
 │   ├── assets/
 ```
 
