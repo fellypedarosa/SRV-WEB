@@ -1,7 +1,7 @@
 
 # 🌐 Projeto de Servidor Web com Docker + Nginx + Cloudflare Tunnel
 
-Turma, queria compartilhar com vcs esse projetinho de servidor pessoal configurado para hospedar o domínio [fellyperosa.com.br](https://fellyperosa.com.br), utilizando Docker, Nginx e Cloudflare Tunnel com foco em segurança, desempenho e automatização de deploys.
+Turma, queria compartilhar com vcs esse projetinho de servidor pessoal configurado para hospedar meu domínio [fellyperosa.com.br](https://fellyperosa.com.br), utilizando Docker, Nginx e Cloudflare Tunnel com foco em segurança, desempenho e automatização de deploys.
 
 > 💡 **Nota:**  
 > "Eu sei, eu sei... Pq usar DNS na Cloudflare e ainda um Tunnel de redirecionamento?  
@@ -27,102 +27,166 @@ Turma, queria compartilhar com vcs esse projetinho de servidor pessoal configura
 ```
 
 ---
+## 1. Redes Docker
 
-## 1. Instalação do Ubuntu Server
+O ambiente agora utiliza **duas redes externas no Docker**:
 
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install ufw fail2ban -y
-```
+|Rede|Função|
+|---|---|
+|site|Comunicação entre Nginx, Certbot e o site React|
+|gitlab|Comunicação entre Nginx e o container GitLab|
 
----
-
-## 2. Instalação do Docker e Docker Compose
-
-```bash
-curl -fsSL https://get.docker.com | sudo bash
-sudo apt install docker-compose -y
-sudo usermod -aG docker $USER
-```
+> ✅ O Nginx participa das duas redes simultaneamente.
 
 ---
 
-## 3. Firewall e Segurança
+## 2. Cloudflare Tunnel (Zero Trust)
 
-```bash
-sudo ufw allow OpenSSH
-sudo ufw allow 80,443/tcp
-sudo ufw enable
-```
+- **Tunnel criado via painel web da Cloudflare** (modo Token).
+    
+- Todos os **Public Hostnames** (ex: `fellyperosa.com.br`, `gitlab.fellyperosa.com.br`) **são gerenciados diretamente pelo painel da Cloudflare**, via **Zero Trust Dashboard**.
+    
+- **O arquivo `/etc/cloudflared/config.yml` está obsoleto e não é mais usado**.
+    
+- O serviço `cloudflared.service` roda com `--token` e carrega tudo remoto.
 
 ---
 
-## 4. Configuração do Nginx
+## 3. Configuração do Nginx
 
-Configuração básica com compressão `gzip`, cache de arquivos estáticos, definição explícita de `Content-Type` e suporte a SPA React com fallback para `index.html`.
+### Site Principal (`fellyperosa.com.br`)
 
-```nginx
-server {
-    listen 80;
-    server_name fellyperosa.com.br www.fellyperosa.com.br;
-    root /usr/share/nginx/html;
-    index index.html;
+✔️ Serve arquivos estáticos (HTML, CSS, JS).  
+✔️ Redireciona `/assets/`, `/index.html` e outras rotas SPA.  
+✔️ Suporte a Certbot para SSL local.
 
-    location /assets/ {
-        try_files $uri $uri/ =404;
-        expires 30d;
-        access_log off;
+---
+
+### Subdomínio GitLab (`gitlab.fellyperosa.com.br`)
+
+✔️ Faz proxy reverso para o container GitLab (`172.30.0.10:8929`).  
+✔️ **Sem SSL local** (HTTPS termina na Cloudflare).  
+✔️ Só responde na porta 80 (a Cloudflare faz o HTTPS no navegador).
+
+Blocos no nginx.conf:
+```conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    access_log    /var/log/nginx/access.log;
+    error_log     /var/log/nginx/error.log warn;
+    
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    server {
+        listen 80;
+        server_name fellyperosa.com.br www.fellyperosa.com.br;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location /assets/ {
+            try_files $uri $uri/ =404;
+            expires 30d;
+            access_log off;
+        }
+
+        location / {
+            try_files $uri /index.html;
+        }
+
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        error_page 404 /404.html;
+        location = /404.html {
+            root /usr/share/nginx/html;
+            internal;
+        }
     }
 
-    location ~* \.js$ {
-        add_header Content-Type application/javascript always;
-        try_files $uri =404;
-    }
+        server {
+        listen 80;
+        server_name gitlab.fellyperosa.com.br;
 
-    location ~* \.css$ {
-        add_header Content-Type text/css always;
-        try_files $uri =404;
-    }
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
 
-    location ~* \.svg$ {
-        add_header Content-Type image/svg+xml always;
-        try_files $uri =404;
-    }
-
-    location / {
-        try_files $uri /index.html;
-    }
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    error_page 404 /404.html;
-    location = /404.html {
-        internal;
+        location / {
+            proxy_pass http://172.30.0.10:8929;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
     }
 }
+
 ```
 
 ---
 
-## 5. Cloudflare Tunnel (Zero Trust)
+## 4. Docker-Compose
+```yml
+version: '3'
 
-Tunnel criado pelo painel Cloudflare, com `cloudflared` instalado via systemd. O proxy laranja foi ativado e o cache purgado manualmente após deploy.
+services:
+  nginx:
+    image: nginx:latest
+    container_name: fellype-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./html:/usr/share/nginx/html
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/mime.types:/etc/nginx/mime.types
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - certbot
+    restart: always
+    networks:
+      - site  # Rede interna do site
+      - gitlab  # Rede interna do GitLab
 
----
+  certbot:
+    image: certbot/certbot
+    container_name: fellype-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done"
+    restart: always
+    networks:
+      - site  # Rede interna do site
+      - gitlab  # Rede interna do GitLab
+networks:
+  site:
+    external: true
+  gitlab:
+    external: true
+```
 
-## 6. Deploy e Logs
+## 5. Deploy e Logs
 
 ```bash
 cd ~/nosso-projeto
 docker-compose up -d
-sudo docker logs nginx-container
+docker exec -it nginx-fellype nginx -t
+docker exec -it nginx-fellype nginx -s reload
 ```
 
 ---
 
-## 7. Backup Automatizado
+## 6. Backup Automatizado
 
 - Agendado via `crontab` para rodar semanalmente.
 - Formato `.tar.gz` com todos os arquivos do projeto.
@@ -131,30 +195,31 @@ sudo docker logs nginx-container
 
 ---
 
-## 8. Observações para uma Manutenção Tri
+## 7. Observações para uma Manutenção Tri
 
 - ⚠️ Sempre realizar *purge cache* no Cloudflare após atualizar arquivos `.js` e `.css`.
 - ✔️ Certbot em execução contínua para renovação automática do SSL.
 - ✔️ Lembrar de copiar o conteúdo da pasta `dist/` para `html/` após build do React.
-
----
-
-## 🔒 Próxima melhoria futura: cabeçalhos extras no Nginx
-
-```nginx
-add_header X-Frame-Options "DENY";
-add_header X-Content-Type-Options "nosniff";
-add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-```
+- ✔️ Não mexer mais no config.yml do Cloudflared!
+- ✔️ Qualquer novo subdomínio → criar primeiro no painel da Cloudflare Zero Trust → Public Hostnames
+- ✔️ Toda vez que adicionar novo bloco no Nginx → testar (nginx -t) e reload (nginx -s reload)
+- ✔️ Se precisar adicionar SSL local para algum serviço no futuro → Configurar Certbot conforme o modelo do site principal.
 
 ---
 
 ## 📊 Arquitetura do Sistema
 
 ```plaintext
-Internet ---> DNS (Cloudflare Proxy)
-        ---> Zero Trust Tunnel
-        ---> cloudflared
-        ---> Docker Nginx
-        ---> HTML + React SPA (fallback routing para /index.html pra tu não tentar injetar besteira kk) 
+Internet
+  ↓
+Cloudflare DNS (Proxy Laranja)
+  ↓
+Cloudflare Zero Trust Tunnel
+  ↓
+cloudflared (via Token)
+  ↓
+Nginx (Docker)
+  ↓
+→ Site React (porta 80)
+→ GitLab (via proxy para 172.30.0.10:8929)
 ```
