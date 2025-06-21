@@ -10,7 +10,7 @@ Turma, queria compartilhar com vcs esse projetinho de servidor pessoal configura
 
 ---
 
-## ✅ Estrutura do Projeto
+## 📊 Estrutura do Projeto
 
 ```plaintext
 ~/nosso-projeto/
@@ -126,6 +126,11 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Forwarded-Proto https;
+
+            # Forçar modo dark (gambiarra via sub_filter)
+            proxy_set_header Accept-Encoding "";
+            sub_filter '<html class="gl-light' '<html class="gl-dark';
+            sub_filter_once off;
         }
     }
 }
@@ -139,29 +144,39 @@ http {
 version: '3'
 
 services:
-  gitlab:
-    image: gitlab/gitlab-ce:latest
-    container_name: gitlab
-    restart: always
-    hostname: 'gitlab.local'
-    environment:
-      GITLAB_OMNIBUS_CONFIG: | 
-        external_url 'https://gitlab.fellyperosa.com.br' 
-        nginx['listen_port'] = 8929                                                                      
-        nginx['listen_https'] = false                                                               
-        external_https = true                                                                 
+  nginx:
+    image: nginx:latest
+    container_name: fellype-nginx
     ports:
-      - "8920:8929"   # Porta web externa → interna
-      - "2222:22"     # Porta SSH externa → interna
-    networks: 
-      gitlab:
-        ipv4_address: 172.30.0.10
+      - "80:80"
+      - "443:443"
     volumes:
-      - '/mnt/HD/BANCO/gitlab-banco:/var/opt/gitlab' 
-      - './config:/etc/gitlab'
-      - './logs:/var/log/gitlab'
+      - ./html:/usr/share/nginx/html
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/mime.types:/etc/nginx/mime.types
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - certbot
+    restart: always
+    networks:
+      - site  # Rede interna do site
+      - gitlab  # Rede interna do GitLab
 
+  certbot:
+    image: certbot/certbot
+    container_name: fellype-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done"
+    restart: always
+    networks:
+      - site  # Rede interna do site
+      - gitlab  # Rede interna do GitLab
 networks:
+  site:
+    external: true
   gitlab:
     external: true
 
@@ -199,7 +214,7 @@ docker exec -it nginx-fellype nginx -s reload
 
 ---
 
-## 📊 Arquitetura do Sistema
+## 🌐 Fluxo de rede:
 
 ```plaintext
 Internet
